@@ -4,103 +4,40 @@ use anyhow::Result;
 use std::time::Duration;
 use futures::StreamExt;
 use inquire::{error::InquireError, Select};
+use reqwest;
 
-struct TamaLibCrawler {
-    date_scraper: Selector,
-    datetime_scraper: Selector,
-}
-
-impl Default for TamaLibCrawler {
-    fn default() -> Self {
-        Self {
-            date_scraper: Selector::parse("table:nth-of-type(2) a").unwrap(),
-            datetime_scraper: Selector::parse("table tr:nth-child(5) input[type=radio]").unwrap()
-        }
-    }
-}
-
-#[derive(Debug)]
-enum TamaLibState {
-    Index,
-    Uketsuke(Date),
-}
-
-#[derive(Debug)]
-struct Date {
-    date: String,
-    url: String,
-    times: Vec<String>
-}
-
-impl Scraper for TamaLibCrawler {
-    type Output = Date;
-    type State = TamaLibState;
-
-    fn scrape(&mut self, response: Response<Self::State>, crawler: &mut Crawler<Self>) -> Result<Option<Self::Output>> {
-        let html = response.html();
-
-        if let Some(state) = response.state {
-            match state {
-                TamaLibState::Index => {
-                    for (date, url) in html
-                        .select(&self.date_scraper)
-                        .map(|el| (el.text().collect::<Vec<_>>().join(""), el.value().attr("href").map(str::to_string).unwrap()))
-                        {
-                            crawler.visit_with_state(
-                                url.clone(),
-                                TamaLibState::Uketsuke(Date{
-                                    date: date,
-                                    url: url,
-                                    times: Vec::new()
-                                }),
-                            );
-                        }
-                }
-                TamaLibState::Uketsuke(mut date) => {
-                    for datetime in html
-                        .select(&self.datetime_scraper)
-                        .filter_map(|el| el.value().attr("value").map(str::to_string))
-                        {
-                            date.times.push(datetime);
-                        }
-                    return Ok(Some(date));
-                }
-            }
-        }
-        Ok(None)
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
-    let config = CrawlerConfig::default().respect_robots_txt().allow_domains_with_delay(
-        [
-            ("www.library.metro.tokyo.lg.jp", RequestDelay::Fixed(Duration::from_millis(2_000))),
-            ("www.shinsei.elg-front.jp", RequestDelay::Fixed(Duration::from_millis(1_000)))
-            ],
-    );
-    let mut collector = Collector::new(TamaLibCrawler::default(), config);
+    // セレクターをパース　(このセレクターは記事のアンカーノード群(タイトル)を指す。 <a href="link">Title</a>)
+    let selector = scraper::Selector::parse("table tr:nth-child(5) input[type=radio]").unwrap();
 
-    collector.crawler_mut().visit_with_state(
-        "https://www.library.metro.tokyo.lg.jp/guide/tama_library/reservation_tama/",
-        TamaLibState::Index
-    );
+    // `https://blog.rust-lang.org/` へHTTPリクエスト
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let body: String = client.get("https://www.shinsei.elg-front.jp/tokyo2/navi/index.html").send().await?.text().await?;
 
-    while let Some(output) = collector.next().await {
-        if let Ok(date) = output {
-            println!("Date: {:?}", date)
-        }
-    }
+    println!("{body}");
+    // HTMLをパース
+    let document = scraper::Html::parse_document(&body);
 
-    // let options: Vec<&str> = vec!["Banana", "Apple", "Strawberry", "Grapes", "Lemon", "Tangerine", "Watermelon", "Orange", "Pear", "Avocado", "Pineapple"];
+    // セレクターを用いて要素を取得
+    let elements = document.select(&selector);
 
-    // let ans: Result<&str, InquireError> = Select::new("Date", options).prompt();
+    // 全記事名を出力
+    elements.for_each(|e| println!("{}", e.text().next().unwrap()));
 
-    // match ans {
-    //     Ok(choice) => println!("{}! That's mine too!", choice),
-    //     Err(_) => println!("There was an error, please try again"),
-    // }
+    // 一件目の記事名
+    // assert_eq!(elements.next().unwrap().text().next().unwrap(), "Announcing Rust 1.50.0");
+    // 二件目の記事名
+    // assert_eq!(elements.next().unwrap().text().next().unwrap(), "mdBook security advisory");
+    // 三件目の記事名
+    // assert_eq!(elements.next().unwrap().text().next().unwrap(), "Announcing Rust 1.49.0");
+    // 最古の記事名
+    // assert_eq!(elements.last().unwrap().text().next().unwrap(), "Road to Rust 1.0");
+
 
     Ok(())
 }
